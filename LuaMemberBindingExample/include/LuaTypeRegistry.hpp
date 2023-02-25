@@ -29,11 +29,13 @@ protected:
     std::string _typeName;
     std::vector<std::reference_wrapper<const LuaTypeRegistryBase>> _baseTypeRegistries;
     std::map<std::string, Member> _wrappedMembers;
+    std::map<std::string, FunctionType> _freeFunctions;
 
     LuaTypeRegistryBase(std::string typeName, std::span<std::reference_wrapper<const LuaTypeRegistryBase>> baseTypeRegistries) noexcept
         : _typeName(typeName),
             _baseTypeRegistries(baseTypeRegistries.begin(), baseTypeRegistries.end()),
-            _wrappedMembers()
+            _wrappedMembers(),
+            _freeFunctions()
         {}
 public:
     [[nodiscard]] inline const std::string& GetTypeName() const noexcept
@@ -140,6 +142,16 @@ private:
         return 0;
     }
 
+    static int CreateObject(lua_State* L)
+    {
+        LuaTypeRegistry* self = static_cast<LuaTypeRegistry*>(
+            lua_touserdata(L, lua_upvalueindex(1)));
+
+        static_cast<void>(self->Allocate(L));
+
+        return 1;
+    }
+
 public:
     LuaTypeRegistry(std::string typeName, std::span<std::reference_wrapper<const LuaTypeRegistryBase>> baseTypeRegistries) noexcept
         : LuaTypeRegistryBase(typeName, baseTypeRegistries)
@@ -151,7 +163,7 @@ public:
             std::span<std::reference_wrapper<const LuaTypeRegistryBase>>{})
         {}
 
-    void RegisterFunction(const std::string& name, FunctionType func)
+    void RegisterMethod(const std::string& name, FunctionType func)
     {
         if (_wrappedMembers.find(name) != _wrappedMembers.end())
         {
@@ -159,6 +171,16 @@ public:
         }
 
         _wrappedMembers.emplace(name, func);
+    }
+
+    void RegisterFreeFunction(const std::string& name, FunctionType func)
+    {
+        if (_freeFunctions.find(name) != _freeFunctions.end())
+        {
+            throw std::runtime_error("A Lua type registry cannot have duplicate free functions.");
+        }
+
+        _freeFunctions.emplace(name, func);
     }
 
     template <typename TMember>
@@ -185,7 +207,7 @@ public:
 
     void GenerateBindings(lua_State* L) const
     {
-        if (!luaL_newmetatable(L, _typeName.c_str()))
+        if (!luaL_newmetatable(L, GetTypeName().c_str()))
         {
             throw std::runtime_error("This Lua type already exists");
         }
@@ -203,6 +225,25 @@ public:
         // use one updata value to keep a reference to this
         luaL_setfuncs(L, metamethods, 1);
         lua_pop(L, 1);
+
+        lua_createtable(L, 0, static_cast<int>(_freeFunctions.size() + 1));
+        for (const auto& pair : _freeFunctions)
+        {
+            lua_pushstring(L, pair.first.c_str());
+            lua_pushlightuserdata(L, const_cast<void*>(static_cast<const void*>(&pair.second)));
+            lua_pushcclosure(L, [](lua_State* L) {
+                FunctionType* function = static_cast<FunctionType*>(lua_touserdata(L, lua_upvalueindex(1)));
+                return function->operator()(L);
+            }, 1);
+            lua_rawset(L, -3);
+        }
+
+        lua_pushliteral(L, "Create");
+        lua_pushlightuserdata(L, const_cast<void*>(static_cast<const void*>(this)));
+        lua_pushcclosure(L, CreateObject, 1);
+        lua_rawset(L, -3);
+
+        lua_setglobal(L, GetTypeName().c_str());
     }
 
     template <typename... Args>

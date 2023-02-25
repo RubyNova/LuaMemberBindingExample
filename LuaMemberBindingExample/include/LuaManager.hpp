@@ -33,6 +33,8 @@ public:
 
     void Execute(std::string code);
     void SetGlobal(std::string name);
+
+    void SetGlobalFunction(std::string name, lua_CFunction fn);
 };
 
 #endif
