@@ -43,15 +43,17 @@ int main(int, char**) {
     static_cast<void>(node);
     manager.SetGlobal("node"); // globals aren't the best for everything, upvalues make more sense in local variable situations, but globals are easiest for proof of concept.
 
-    manager.Execute("ElementNode.SaySomething()");
-    manager.Execute("local myNode = ElementNode.Create() myNode:SayHello()");
+    //manager.Execute("ElementNode.SaySomething()");
+    //manager.Execute("local myNode = ElementNode.Create() myNode:SayHello()");
     //manager.Execute("node:SayHello()");
-    manager.Execute("print(node.PointlessBool)");
+    manager.Execute("node.PointlessBool = true print(node.PointlessBool)");
 
+/*
     for (int i = 0; i < 5; i++)
     {
         manager.Execute("node:SetPointlessBool(not node.PointlessBool) print(node.PointlessBool)");
     }
 
     manager.Execute("for i = 1, 10 do print(node:Add(i, 5)) end");
+    */
 }

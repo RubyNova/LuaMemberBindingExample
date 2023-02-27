@@ -16,13 +16,21 @@
 #include <string_view>
 #include <variant>
 #include <vector>
+#include <string>
+
+struct FieldReadWriter
+{
+    using FieldAccessorType = std::function<void(void*,lua_State*)>;
+
+    FieldAccessorType getter;
+    FieldAccessorType setter;
+};
 
 class LuaTypeRegistryBase
 {
 public:
     using FunctionType = std::function<int(lua_State*)>;
-    using MemberAccessorType = std::function<void(void*,lua_State*)>;
-    using Member = std::variant<FunctionType, MemberAccessorType>;
+    using Member = std::variant<FunctionType, FieldReadWriter>;
     using OptionalMemberRef = std::optional<std::reference_wrapper<const Member>>;
 
 protected:
@@ -86,7 +94,7 @@ template <typename T>
 class LuaTypeRegistry : public LuaTypeRegistryBase
 {
 public:
-    using MemberType = std::variant<bool T::*>;
+    using MemberType = std::variant<bool T::*, const char* T::*, int32_t T::*, std::string T::*>;
 
 private:
     static int LookupMember(lua_State* L)
@@ -117,9 +125,9 @@ private:
                 lua_pushcclosure(L, f, 1);
                 return 1;
             }
-            else if constexpr(std::is_same_v<TMember, MemberAccessorType>)
+            else if constexpr(std::is_same_v<TMember, FieldReadWriter>)
             {
-                member(value, L);
+                member.getter(value, L);
                 return 1;
             }
             else
@@ -127,6 +135,37 @@ private:
                 static_assert(always_false_v<TMember>, "non-exhaustive visitor");
                 // unreachable but might be needed to make compiler happy
                 return lua_error(L);
+            }
+        }, member.value().get());
+    }
+
+    static int AssignMember(lua_State* L)
+    {
+        // lua_upvalueindex converts an upvalue index to a magic stack index
+        LuaTypeRegistry* self = static_cast<LuaTypeRegistry*>(
+            lua_touserdata(L, lua_upvalueindex(1)));
+
+        void* value = luaL_checkudata(L, 1, self->GetTypeName().c_str());
+        
+        size_t length;
+        const char* memberName = luaL_checklstring(L, 2, &length);
+
+        auto member = self->FindNamedMember(std::string_view{memberName, length});
+        if (!member)
+        {
+            return luaL_error(L, "failed to find key '%s'", memberName);
+        }
+
+        return std::visit([value, L, memberName](auto&& member) {
+            using TMember = std::decay_t<decltype(member)>;
+            if constexpr(std::is_same_v<TMember, FieldReadWriter>)
+            {
+                member.setter(value, L);
+                return 0;
+            }
+            else
+            {
+                return luaL_error(L, "Expected field with name '%s', got member function.", memberName); //TODO: this error probably isn't very good
             }
         }, member.value().get());
     }
@@ -191,16 +230,95 @@ public:
             throw std::runtime_error("A Lua type registry cannot have duplicate members.");
         }
 
-        _wrappedMembers.emplace(name, [member](auto wrappedValue, auto L)
+        _wrappedMembers.emplace(name,
+        FieldReadWriter 
         {
-            T* value = static_cast<T*>(wrappedValue);
-            if constexpr (std::is_same_v<TMember, bool>)
+            [member](auto wrappedValue, auto L)
             {
-                lua_pushboolean(L, value->*member ? 1 : 0);
-            }
-            else
+                T* value = static_cast<T*>(wrappedValue);
+                if constexpr (std::is_same_v<TMember, bool>)
+                {
+                    lua_pushboolean(L, value->*member ? 1 : 0);
+                }
+                else if constexpr (std::is_same_v<TMember, const char*>)
+                {
+                    lua_pushstring(L, value->*member);
+                }
+                else if constexpr (std::is_same_v<TMember, std::string>)
+                {
+                    lua_pushstring(L, value->*member.c_str());
+                }
+                else if constexpr (std::is_same_v<TMember, int32_t>)
+                {
+                    lua_pushnumber(L, static_cast<lua_Number>(value->*member));
+                }
+                else
+                {
+                    static_assert(always_false_v<TMember>, "non-exhaustive visitor");
+                }
+            },
+            [member](auto wrappedValue, auto L)
             {
-                static_assert(always_false_v<TMember>, "non-exhaustive visitor");
+                auto logTypeError = [](lua_State* L, const char* expected)
+                {
+                    int luaType = lua_type(L, -1);
+                    luaL_error(L, "Expected boolean, got %s.", expected, lua_typename(L, luaType)); // TODO: Figure out the return stuff
+                };
+
+                T* value = static_cast<T*>(wrappedValue);
+                if constexpr (std::is_same_v<TMember, bool>)
+                {
+                    if (!lua_isboolean(L, -1))
+                    {
+                        logTypeError(L, "boolean"); // TODO: Fix this and return somehow.
+                        return;
+                    }
+
+                    bool result = static_cast<bool>(lua_toboolean(L, -1));
+                    value->*member = result;
+                    lua_pop(L, -1);
+                }
+                else if constexpr (std::is_same_v<TMember, const char*>)
+                {
+                    if (!lua_isstring(L, -1))
+                    {
+                        logTypeError(L, "string"); // TODO: Fix this and return somehow.
+                        return;
+                    }
+
+                    const char* result = lua_tostring(L, -1);
+                    value->*member = new const char*[strlen(result) + 1];
+                    strcpy_s(value->*member, result);
+                    lua_pop(L, -1);
+                }
+                else if constexpr (std::is_same_v<TMember, std::string>)
+                {
+                    if (!lua_isstring(L, -1))
+                    {
+                        logTypeError(L, "string"); // TODO: Fix this and return somehow.
+                        return;
+                    }
+
+                    const char* result = lua_tostring(L, -1);
+                    value->*member = std::string(result);
+                    lua_pop(L, -1);
+                }
+                else if constexpr (std::is_same_v<TMember, int32_t>)
+                {
+                    if (!lua_isnumber(L, -1))
+                    {
+                        logTypeError(L, "number"); // TODO: Fix this and return somehow.
+                        return;
+                    }
+
+                    LUA_NUMBER number = lua_tonumber(L, -1);
+                    value->*member = static_cast<int32_t>(number);
+                    lua_pop(L, -1);
+                }
+                else
+                {
+                    static_assert(always_false_v<TMember>, "non-exhaustive visitor");
+                }
             }
         });
     }
@@ -215,6 +333,7 @@ public:
         luaL_Reg metamethods[] = {
             {"__index", LookupMember},
             {"__gc", CleanupObject},
+            {"__newindex", AssignMember},
             {nullptr, nullptr}
         };
 

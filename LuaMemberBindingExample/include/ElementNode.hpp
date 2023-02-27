@@ -6,11 +6,13 @@
 #define ELEMENTNODE_H
 
 #include <cstdint>
+#include <string>
 
 class ElementNode
 {
 public:
     bool pointlessBool;
+    std::string pointlessString;
     ElementNode() = default;
 
     void SayHelloWorld() const noexcept;

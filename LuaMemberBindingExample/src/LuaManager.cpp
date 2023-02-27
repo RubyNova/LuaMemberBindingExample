@@ -17,7 +17,11 @@ LuaManager::~LuaManager()
 
 void LuaManager::Execute(std::string code)
 {
-    luaL_dostring(L, code.c_str());
+    if (luaL_dostring(L, code.c_str()) != LUA_OK)
+    {
+        auto str = lua_tostring(L, -1);
+        throw std::runtime_error(std::string(str));
+    }
     // TODO: error handling
 }
 
